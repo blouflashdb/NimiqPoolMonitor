@@ -58,6 +58,13 @@ Pools pay in lumps, so the window starts at the first payout after our first ent
 - *Pays unelected stake*: the pool paid us before our stake was part of an election. That money comes out of other stakers' share, which suggests the pool splits rewards by current rather than election stakes.
 - *Restakes < 100 NIM*: restake payouts below 100 NIM will be rejected after the next protocol upgrade, so small stakers of that pool would stop receiving rewards. The flag fires per add-stake transaction (or per unmatched balance growth) below 100 NIM.
 
+**Unstake all**: the dashboard's *Stop monitoring* card has an *Unstake all* button. Since the web app only reads the database, it drops an `unstake-all.request` file into the data directory, and the worker picks it up on its next tick. From then on, nothing is funded or staked again, and every pool wallet (including excluded pools') moves its NIM back to the funding wallet, one transaction per tick:
+1. *Deactivate* the active stake (`set-active-stake 0`). It is released after the next election plus the lock-up period.
+2. Wait until the staker's `inactiveRelease` block, then *retire* the inactive stake and *withdraw* it (`remove-stake`) straight to the funding wallet. Restakes that arrived in the meantime are deactivated only after that, so they don't restart the lock of the stake already waiting.
+3. When the staker is gone, *sweep* the wallet's liquid NIM (e.g. direct payouts) to the funding wallet.
+
+Payouts are still recorded while stake remains. This is one-way: the request is stored in the `meta` table (`unstake_all`), and the worker keeps unstaking after restarts.
+
 ## Configuration
 
 See [.env.example](.env.example): `NIMIQ_NETWORK` (`TestAlbatross` works too), `STAKE_NIM`, `FEE_TOLERANCE`, `POOL_ALLOWLIST` (cheap trial with a few pools), `POOL_EXCLUDE` (unset = the defaults above, empty = exclude nothing), `WEB_PORT`.

@@ -1,13 +1,16 @@
 import type { Pool } from '@nimiq-pool-monitor/db'
 import type { DB } from './db.ts'
-import { and, asc, count, epochStakes, eq, gt, isNotNull, lt, max, notExists, payouts, pendingTxs, pools, rewardEvents, sql, stakeAdditions } from '@nimiq-pool-monitor/db'
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { and, asc, count, epochStakes, eq, gt, isNotNull, lt, max, notExists, payouts, pendingTxs, pools, rewardEvents, sql, stakeAdditions, UNSTAKE_REQUEST_FILE } from '@nimiq-pool-monitor/db'
 import * as Nimiq from '@nimiq/core'
 
 import { config, LUNA_PER_NIM, stakeLuna } from './config.ts'
-import { logEvent, setMeta } from './db.ts'
+import { getMeta, logEvent, setMeta } from './db.ts'
 import { electionBlockFor, eligibleEpoch, rewardedEpoch, stakesEpochAt } from './epochs.ts'
 import { historySince } from './history.ts'
 import { readStakes } from './snapshot.ts'
+import { nextUnstakeStep } from './unstake.ts'
 import { fetchPools } from './validators.ts'
 import { addr, deriveKeyPair } from './wallets.ts'
 
@@ -25,6 +28,8 @@ export class Monitor {
   private stakesCapturedFor = 0
   private capturingStakes = false
   private unmatchedGrowthSince = new Map<string, number>()
+  /** Set once everything is being unstaked: funding and staking stop for good. */
+  private unstakingSince: number | null = null
 
   private db: DB
   private client: Nimiq.Client
@@ -42,6 +47,8 @@ export class Monitor {
     setMeta(this.db, 'funding_address', addr(this.funding))
     setMeta(this.db, 'stake_luna', String(stakeLuna))
     setMeta(this.db, 'network', config.network)
+    const unstaking = getMeta(this.db, 'unstake_all')
+    this.unstakingSince = unstaking ? Number(unstaking) : null
 
     // Capture election stakes as soon as the election block arrives, not on the next tick.
     await this.client.addHeadChangedListener(() => void this.onHead())
@@ -113,12 +120,17 @@ export class Monitor {
 
     if (Date.now() - this.lastPoolSync > config.poolSyncMinutes * 60_000)
       await this.syncPools()
+    this.acceptUnstakeRequest()
 
     const fundingBalance = (await this.client.getAccount(addr(this.funding))).balance
     setMeta(this.db, 'funding_balance', String(fundingBalance))
     let available = fundingBalance - this.pendingFunding()
 
-    const monitored = this.db.select().from(pools).where(and(isNotNull(pools.walletAddress), eq(pools.excluded, false))).orderBy(asc(pools.walletIndex)).all()
+    // Unstaking covers every wallet, including those of pools excluded since they were funded.
+    const monitored = this.db.select().from(pools).where(and(
+      isNotNull(pools.walletAddress),
+      this.unstakingSince ? undefined : eq(pools.excluded, false),
+    )).orderBy(asc(pools.walletIndex)).all()
     for (const pool of monitored) {
       try {
         available = await this.processPool(pool, head, available)
@@ -132,6 +144,19 @@ export class Monitor {
 
   private publishNode(head: number, consensus: boolean) {
     setMeta(this.db, 'node', JSON.stringify({ head, consensus, ts: Date.now() }))
+  }
+
+  /** Picks up the web app's request to unstake everything (see UNSTAKE_REQUEST_FILE). */
+  private acceptUnstakeRequest() {
+    const file = join(config.dataDir, UNSTAKE_REQUEST_FILE)
+    if (!existsSync(file))
+      return
+    if (!this.unstakingSince) {
+      this.unstakingSince = Date.now()
+      setMeta(this.db, 'unstake_all', String(this.unstakingSince))
+      logEvent(this.db, 'warn', `unstaking all pools: funding stopped, stake goes back to the funding wallet ${addr(this.funding)} once released`)
+    }
+    rmSync(file, { force: true })
   }
 
   /** Funding transactions that were sent but may not yet be reflected in the balance. */
@@ -214,6 +239,15 @@ export class Monitor {
     this.updatePool(pool.address, { liquidLuna: liquid, stakeLuna: staked, updatedAt: Date.now() })
     const pending = this.hasPending(pool.address)
 
+    if (this.unstakingSince) {
+      if (!pending)
+        await this.unstake(pool, kp, staker, liquid, head)
+      // Keep recording payouts for the epochs our stake was still elected in.
+      if (staker && pool.stakingSince && !pool.excluded)
+        await this.monitorPayouts(pool, wallet, staker.balance, head)
+      return available
+    }
+
     if (!staker) {
       if (pending)
         return available
@@ -267,11 +301,57 @@ export class Monitor {
     if (pool.stakeHeight == null || pool.stakeInitial == null || pool.stakeTxHash == null)
       pool = await this.recordStakeHeight(pool, wallet)
     this.setStatus(pool.address, 'staking')
+    await this.monitorPayouts(pool, wallet, staker.balance, head)
+    return available
+  }
 
+  private async monitorPayouts(pool: Pool, wallet: string, stakerBalance: number, head: number) {
     await this.collectDirectPayouts(pool, wallet, head)
     await this.scanRewardAddress(pool, wallet, head)
-    this.recordUnmatchedGrowth(pool, staker.balance, head)
-    return available
+    this.recordUnmatchedGrowth(pool, stakerBalance, head)
+  }
+
+  /** Sends the next transaction that moves this pool wallet's stake and liquid NIM back to the funding wallet. */
+  private async unstake(pool: Pool, kp: Nimiq.KeyPair, staker: Nimiq.PlainStaker | undefined, liquid: number, head: number) {
+    const step = nextUnstakeStep(staker, liquid, head, config.feeLuna)
+    const wallet = kp.toAddress()
+    const funding = this.funding.toAddress()
+    const fee = BigInt(config.feeLuna)
+    const nim = (luna: number) => `${(luna / LUNA_PER_NIM).toFixed(5)} NIM`
+    let tx: Nimiq.Transaction
+    let action: string
+    switch (step.kind) {
+      case 'deactivate':
+        tx = Nimiq.TransactionBuilder.newSetActiveStake(wallet, 0n, fee, head, this.networkId)
+        action = `deactivating ${nim(staker!.balance)} stake`
+        break
+      case 'retire':
+        tx = Nimiq.TransactionBuilder.newRetireStake(wallet, BigInt(step.value), fee, head, this.networkId)
+        action = `retiring ${nim(step.value)} released stake`
+        break
+      case 'remove':
+        tx = Nimiq.TransactionBuilder.newRemoveStake(funding, BigInt(step.value), fee, head, this.networkId)
+        action = `withdrawing ${nim(step.value)} stake to the funding wallet`
+        break
+      case 'sweep':
+        tx = Nimiq.TransactionBuilder.newBasic(wallet, funding, BigInt(step.value), fee, head, this.networkId)
+        action = `sending ${nim(step.value)} to the funding wallet`
+        break
+      case 'wait':
+        this.setStatus(pool.address, 'unstaking', step.release != null && step.release > head
+          ? `stake locked until block ${step.release} (~${Math.ceil((step.release - head) / 60)} min)`
+          : step.reason)
+        return
+      case 'done':
+        if (pool.status !== 'unstaked') {
+          this.setStatus(pool.address, 'unstaked', 'everything sent back to the funding wallet')
+          logEvent(this.db, 'info', 'unstaked: everything sent back to the funding wallet', pool.address)
+        }
+        return
+    }
+    const hash = await this.send(tx, kp, pool.address, step.kind)
+    this.setStatus(pool.address, 'unstaking', `${action} (${hash})`)
+    logEvent(this.db, 'info', `${action} (${hash})`, pool.address)
   }
 
   /**

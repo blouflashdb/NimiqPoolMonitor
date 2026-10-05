@@ -16,6 +16,12 @@ function connect(client: DatabaseSync) {
 
 export type DB = ReturnType<typeof connect>
 
+/**
+ * The web app cannot write the database, so it asks the worker to unstake everything by creating this file in the
+ * data directory. The worker then records the request in meta `unstake_all` and deletes the file.
+ */
+export const UNSTAKE_REQUEST_FILE = 'unstake-all.request'
+
 /** The worker owns the database: it creates it and applies the migrations. */
 export function openWriter(file: string): DB {
   mkdirSync(dirname(file), { recursive: true })

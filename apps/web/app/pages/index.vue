@@ -5,6 +5,7 @@ interface Overview {
   network: string | null
   node: { head: number, consensus: boolean, ts: number } | null
   funding: { address: string | null, balanceLuna: number, stakePerPoolLuna: number, stillNeededLuna: number }
+  unstake: { since: number | null, requested: boolean, wallets: number, done: number }
   pools: Pool[]
   excluded: { address: string, name: string }[]
   events: { ts: number, level: string, pool: string | null, message: string }[]
@@ -23,12 +24,33 @@ async function copy(text: string) {
   toast.add({ title: 'Copied', description: text })
 }
 
-const monitored = computed(() => (data.value?.pools ?? []).filter(p => p.status === 'staking'))
+// Pools keep their measured fees while and after they are unstaked.
+const monitored = computed(() => (data.value?.pools ?? []).filter(p => p.stakingSince != null))
+const staking = computed(() => monitored.value.filter(p => p.status === 'staking'))
 const flagged = computed(() => monitored.value.filter(p => p.fee.verdict === 'suspicious'))
 const measured = computed(() => monitored.value.filter(p => p.fee.verdict !== 'insufficient'))
 const warned = computed(() => monitored.value.filter(p => p.fee.flags.length))
 const nodeStale = computed(() => !data.value?.node || Date.now() - data.value.node.ts > 10 * 60_000)
-const needsFunding = computed(() => !!data.value?.funding.address && data.value.funding.stillNeededLuna > data.value.funding.balanceLuna)
+const unstaking = computed(() => !!data.value && (data.value.unstake.since != null || data.value.unstake.requested))
+const needsFunding = computed(() => !unstaking.value && !!data.value?.funding.address && data.value.funding.stillNeededLuna > data.value.funding.balanceLuna)
+
+const confirmUnstake = ref(false)
+const unstakeBusy = ref(false)
+async function unstakeAll() {
+  unstakeBusy.value = true
+  try {
+    await $fetch('/api/unstake-all', { method: 'POST', body: { confirm: 'unstake-all' } })
+    confirmUnstake.value = false
+    toast.add({ title: 'Unstaking requested', description: 'The worker starts on its next cycle.' })
+    await refresh()
+  }
+  catch (e) {
+    toast.add({ title: 'Unstaking failed', description: (e as Error).message, color: 'error' })
+  }
+  finally {
+    unstakeBusy.value = false
+  }
+}
 
 const columns: TableColumn<Pool>[] = [
   { accessorKey: 'name', header: 'Pool' },
@@ -72,7 +94,7 @@ const open = (_e: Event, row: { original: Pool }) => navigateTo(`/pools/${encode
           {{ data.pools.length }}
         </p>
         <p class="text-xs text-muted">
-          {{ monitored.length }} staking · {{ measured.length }} measured
+          {{ staking.length }} staking · {{ measured.length }} measured
         </p>
       </UCard>
       <UCard>
@@ -104,11 +126,25 @@ const open = (_e: Event, row: { original: Pool }) => navigateTo(`/pools/${encode
         <p class="text-2xl font-semibold">
           {{ nim(data.funding.balanceLuna) }} NIM
         </p>
-        <p class="text-xs" :class="needsFunding ? 'text-warning' : 'text-muted'">
+        <p v-if="unstaking" class="text-xs text-muted">
+          Stake is returned here once released
+        </p>
+        <p v-else class="text-xs" :class="needsFunding ? 'text-warning' : 'text-muted'">
           {{ nim(data.funding.stillNeededLuna, 0) }} NIM still needed to stake with every pool
         </p>
       </UCard>
     </div>
+
+    <UAlert
+      v-if="unstaking"
+      color="warning"
+      variant="subtle"
+      icon="i-lucide-undo-2"
+      :title="data!.unstake.since ? `Unstaking all pools: ${data!.unstake.done}/${data!.unstake.wallets} wallets done` : 'Unstaking requested'"
+      :description="data!.unstake.since
+        ? 'Funding has stopped. Stake is deactivated and sent back to the funding wallet once it is released, which takes until after the next election. Payouts are still recorded meanwhile.'
+        : 'The worker starts unstaking on its next cycle (within a few minutes).'"
+    />
 
     <UCard v-if="data?.funding.address && needsFunding">
       <template #header>
@@ -174,7 +210,7 @@ const open = (_e: Event, row: { original: Pool }) => navigateTo(`/pools/${encode
           {{ row.original.fee.windowHours ? hours(row.original.fee.windowHours) : '–' }}
         </template>
         <template #status-cell="{ row }">
-          <UBadge :color="row.original.status === 'staking' ? 'success' : row.original.status === 'error' ? 'error' : 'neutral'" variant="outline">
+          <UBadge :color="statusColor(row.original.status)" variant="outline">
             {{ statusLabel[row.original.status] ?? row.original.status }}
           </UBadge>
         </template>
@@ -191,6 +227,38 @@ const open = (_e: Event, row: { original: Pool }) => navigateTo(`/pools/${encode
           </template>
         </p>
       </template>
+    </UCard>
+
+    <UCard v-if="data?.funding.address && !unstaking">
+      <template #header>
+        <h2 class="font-semibold">
+          Stop monitoring
+        </h2>
+      </template>
+      <div class="flex items-center justify-between gap-4 flex-wrap">
+        <p class="text-sm text-muted">
+          Unstake from every pool and send all NIM back to the funding wallet once the stake is unlocked.
+        </p>
+        <UModal
+          v-model:open="confirmUnstake"
+          title="Unstake from every pool?"
+          description="Funding stops for good. Each pool wallet deactivates its stake, waits until it is released (after the next election) and sends it, plus any liquid NIM, back to the funding wallet."
+        >
+          <UButton color="error" variant="soft" icon="i-lucide-undo-2">
+            Unstake all
+          </UButton>
+          <template #footer="{ close }">
+            <div class="flex justify-end gap-2 w-full">
+              <UButton color="neutral" variant="ghost" @click="close">
+                Cancel
+              </UButton>
+              <UButton color="error" icon="i-lucide-undo-2" :loading="unstakeBusy" @click="unstakeAll">
+                Unstake all
+              </UButton>
+            </div>
+          </template>
+        </UModal>
+      </div>
     </UCard>
 
     <UCard v-if="data?.events.length">

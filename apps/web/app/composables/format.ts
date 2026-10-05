@@ -56,7 +56,13 @@ export const statusLabel: Record<string, string> = {
   staking_tx_sent: 'Staking…',
   staking: 'Staking',
   excluded: 'Excluded',
+  unstaking: 'Unstaking…',
+  unstaked: 'Unstaked',
   error: 'Error',
+}
+
+export function statusColor(status: string) {
+  return status === 'staking' ? 'success' : status === 'error' ? 'error' : status === 'unstaking' ? 'warning' : 'neutral'
 }
 
 export function verdictBadge(f: Fee) {

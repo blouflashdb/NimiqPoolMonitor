@@ -1,7 +1,11 @@
-import { desc, events } from '@nimiq-pool-monitor/db'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { desc, events, UNSTAKE_REQUEST_FILE } from '@nimiq-pool-monitor/db'
 
 export default defineEventHandler(() => {
   const all = listPools()
+  const unstakeSince = getMeta('unstake_all')
+  const wallets = all.filter(p => p.walletAddress)
   const pools = all.filter(p => !p.excluded).map(poolSummary)
   const excluded = all.filter(p => p.excluded).map(p => ({ address: p.address, name: p.name }))
   const stake = Number(getMeta('stake_luna') ?? 0)
@@ -15,6 +19,14 @@ export default defineEventHandler(() => {
       balanceLuna: Number(getMeta('funding_balance') ?? 0),
       stakePerPoolLuna: stake,
       stillNeededLuna: unfunded * stake,
+    },
+    unstake: {
+      /** When the worker started unstaking everything (null = not requested or not picked up yet). */
+      since: unstakeSince ? Number(unstakeSince) : null,
+      /** Requested, waiting for the worker's next tick. */
+      requested: existsSync(join(dataDir(), UNSTAKE_REQUEST_FILE)),
+      wallets: wallets.length,
+      done: wallets.filter(p => p.status === 'unstaked').length,
     },
     pools,
     excluded,

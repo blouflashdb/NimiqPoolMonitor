@@ -52,6 +52,7 @@ registerEndpoint('/api/overview', () => ({
   network: 'MainAlbatross',
   node: { head: 1, consensus: true, ts: Date.now() },
   funding: { address: 'NQ00 FUND', balanceLuna: 0, stakePerPoolLuna: 10_000_000, stillNeededLuna: 0 },
+  unstake: { since: null, requested: false, wallets: 3, done: 0 },
   pools: [
     pool('Honest Pool', { fee: { ...fee, verdict: 'ok', confidence: 'high', realFee: 0.03, delta: 0, payoutCount: 9, windowHours: 96 } }),
     pool('Shady Pool', { fee: { ...fee, verdict: 'suspicious', confidence: 'high', realFee: 0.12, delta: 0.09, payoutCount: 9, windowHours: 96 } }),
@@ -84,4 +85,11 @@ it('lists excluded pools separately', async () => {
   expect(page.text()).toContain('Excluded from monitoring')
   expect(page.find('tbody').text()).not.toContain('Dead Pool')
   expect(page.text()).toContain('Dead Pool')
+})
+
+it('offers to unstake everything', async () => {
+  const text = (await mountSuspended(IndexPage)).text()
+  expect(text).toContain('Stop monitoring')
+  expect(text).toContain('Unstake all')
+  expect(text).not.toContain('Unstaking all pools')
 })
