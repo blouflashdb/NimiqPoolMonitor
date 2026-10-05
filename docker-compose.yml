@@ -1,0 +1,31 @@
+services:
+  worker:
+    build: {context: ., target: worker}
+    restart: unless-stopped
+    environment:
+      NIMIQ_NETWORK: ${NIMIQ_NETWORK:-MainAlbatross}
+      STAKE_NIM: ${STAKE_NIM:-100}
+      TX_FEE_LUNA: ${TX_FEE_LUNA:-0}
+      TICK_SECONDS: ${TICK_SECONDS:-120}
+      POOL_SYNC_MINUTES: ${POOL_SYNC_MINUTES:-15}
+      POOL_ALLOWLIST: ${POOL_ALLOWLIST:-}
+      # no value: only passed when set, so the worker's defaults apply otherwise
+      POOL_EXCLUDE:
+      VALIDATORS_API_URL: ${VALIDATORS_API_URL:-}
+      WALLET_MNEMONIC: ${WALLET_MNEMONIC:-}
+    volumes:
+      - data:/data
+
+  web:
+    build: {context: ., target: web}
+    restart: unless-stopped
+    depends_on: [worker]
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    environment:
+      NUXT_FEE_TOLERANCE: ${FEE_TOLERANCE:-0.01}
+    volumes:
+      - data:/data
+
+volumes:
+  data:

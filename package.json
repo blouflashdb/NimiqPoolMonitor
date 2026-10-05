@@ -1,0 +1,38 @@
+{
+  "name": "nimiq-pool-monitor",
+  "type": "module",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "npm run dev -w @nimiq-pool-monitor/web",
+    "build": "npm run build -w @nimiq-pool-monitor/web",
+    "worker": "npm run start -w @nimiq-pool-monitor/worker",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "db:generate": "npm run db:generate -w @nimiq-pool-monitor/db"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^9.5.1",
+    "eslint": "^10.12.0"
+  },
+  "allowScripts": {
+    "vue-demi@0.14.10": true,
+    "bufferutil@4.1.0": true,
+    "es5-ext@0.10.64": true,
+    "esbuild@0.27.7": true,
+    "esbuild@0.28.2": true,
+    "unrs-resolver@1.12.2": true,
+    "utf-8-validate@5.0.10": true
+  },
+  "overrides": {
+    "drizzle-orm": "1.0.0-rc.4"
+  }
+}
