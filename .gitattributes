@@ -1,0 +1,2 @@
+# Normalize line endings to LF in the repository and working copy (matches the antfu ESLint config)
+* text=auto eol=lf
