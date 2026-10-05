@@ -50,6 +50,30 @@ export interface FeeOptions {
   maxSnapshotLagBlocks: number
 }
 
+/** Election stakes as the worker read them, at `snapshotHeight` (the client only serves the current state). */
+export interface StakeSnapshot { electionHeight: number, snapshotHeight: number, stakerBalance: number, validatorStake: number }
+
+/** An add-stake transaction the pool's reward address sent to one of its stakers. */
+export interface StakeAddition { staker: string, blockHeight: number, amount: number }
+
+/**
+ * The stakes fixed at the election block. Restakes the pool sent between the election and the read are part of the
+ * read balances but only count from the next epoch, so they are subtracted again (from our balance only if they went
+ * to `wallet`). Stake others added themselves in between can't be seen and stays in; `lagBlocks` bounds that window.
+ */
+export function electionStakes(s: StakeSnapshot, additions: StakeAddition[], wallet: string | null) {
+  let stakerBalance = s.stakerBalance
+  let validatorStake = s.validatorStake
+  for (const a of additions) {
+    if (a.blockHeight <= s.electionHeight || a.blockHeight > s.snapshotHeight)
+      continue
+    validatorStake -= a.amount
+    if (a.staker === wallet)
+      stakerBalance -= a.amount
+  }
+  return { stakerBalance, validatorStake, lagBlocks: s.snapshotHeight - s.electionHeight }
+}
+
 /** Our entitled share of one reward: 0 before our stake was elected, null if the election stakes are unknown. */
 export function rewardShare(r: RewardPoint, eligibleEpoch: number | null): number | null {
   if (eligibleEpoch == null)

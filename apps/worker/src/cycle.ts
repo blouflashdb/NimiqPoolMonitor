@@ -1,12 +1,13 @@
 import type { Pool } from '@nimiq-pool-monitor/db'
 import type { DB } from './db.ts'
-import { and, asc, count, epochStakes, eq, gt, isNotNull, lt, max, notExists, payouts, pendingTxs, pools, rewardEvents, sql } from '@nimiq-pool-monitor/db'
+import { and, asc, count, epochStakes, eq, gt, isNotNull, lt, max, notExists, payouts, pendingTxs, pools, rewardEvents, sql, stakeAdditions } from '@nimiq-pool-monitor/db'
 import * as Nimiq from '@nimiq/core'
 
 import { config, LUNA_PER_NIM, stakeLuna } from './config.ts'
 import { logEvent, setMeta } from './db.ts'
 import { electionBlockFor, eligibleEpoch, rewardedEpoch, stakesEpochAt } from './epochs.ts'
 import { historySince } from './history.ts'
+import { readStakes } from './snapshot.ts'
 import { fetchPools } from './validators.ts'
 import { addr, deriveKeyPair } from './wallets.ts'
 
@@ -59,7 +60,9 @@ export class Monitor {
 
   /**
    * Rewards of an epoch are split by the stakes fixed at the election block before it, so restakes received
-   * during an epoch only count from the next one. Snapshots taken late (e.g. after a restart) are approximate.
+   * during an epoch only count from the next one. The balances are read at the current head, a few blocks after the
+   * election; the web app subtracts the pool's restakes in between. Snapshots taken late (e.g. after a restart) are
+   * approximate.
    */
   private async captureElectionStakes(head: number) {
     if (this.capturingStakes)
@@ -73,26 +76,27 @@ export class Monitor {
         eq(pools.excluded, false),
         notExists(this.db.select().from(epochStakes).where(and(eq(epochStakes.pool, pools.address), eq(epochStakes.epoch, epoch)))),
       )).all()
-      let complete = true
-      for (const p of missing) {
-        const [staker, validator] = await Promise.all([this.client.getStaker(p.walletAddress!), this.client.getValidator(p.address)])
-        if (!staker || !validator) {
-          complete = false
-          continue
+      if (missing.length) {
+        const { height, exact, stakes } = await readStakes(this.client, missing.map(p => ({ address: p.address, walletAddress: p.walletAddress! })))
+        // The head may have passed the next election while reading; those balances belong to the next epoch.
+        if (stakesEpochAt(height) !== epoch)
+          return
+        for (const s of stakes) {
+          this.db.insert(epochStakes).values({
+            pool: s.pool,
+            epoch,
+            electionHeight: election,
+            snapshotHeight: height,
+            stakerBalance: s.stakerBalance,
+            validatorStake: s.validatorStake,
+          }).onConflictDoNothing().run()
         }
-        this.db.insert(epochStakes).values({
-          pool: p.address,
-          epoch,
-          electionHeight: election,
-          snapshotHeight: head,
-          stakerBalance: staker.balance,
-          validatorStake: validator.totalStake,
-        }).onConflictDoNothing().run()
+        if (stakes.length)
+          logEvent(this.db, 'info', `captured election stakes of ${stakes.length}/${missing.length} pools for epoch ${epoch} (${height - election} blocks after the election${exact ? '' : ', head moved while reading'})`)
+        if (stakes.length < missing.length)
+          return
       }
-      if (complete)
-        this.stakesCapturedFor = epoch
-      if (missing.length)
-        logEvent(this.db, 'info', `captured election stakes of ${missing.length} pools for epoch ${epoch} (${head - election} blocks after the election)`)
+      this.stakesCapturedFor = epoch
     }
     finally {
       this.capturingStakes = false
@@ -352,8 +356,15 @@ export class Monitor {
           rewardedEpoch: rewardedEpoch(tx.blockHeight),
         }).onConflictDoNothing().run()
       }
-      else if (tx.sender === rewardAddress && tx.data.type === 'add-stake' && tx.data.staker === wallet) {
-        if (this.recordPayout(pool.address, 'restake', tx))
+      else if (tx.sender === rewardAddress && tx.data.type === 'add-stake') {
+        this.db.insert(stakeAdditions).values({
+          txHash: tx.transactionHash,
+          pool: pool.address,
+          staker: tx.data.staker,
+          blockHeight: tx.blockHeight,
+          amount: tx.value,
+        }).onConflictDoNothing().run()
+        if (tx.data.staker === wallet && this.recordPayout(pool.address, 'restake', tx))
           logEvent(this.db, 'info', `restake payout ${(tx.value / LUNA_PER_NIM).toFixed(5)} NIM (${tx.transactionHash})`, pool.address)
       }
     })

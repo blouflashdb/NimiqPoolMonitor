@@ -1,6 +1,6 @@
 import type { PayoutPoint, RewardPoint } from '../utils/fees'
 import { describe, expect, it } from 'vitest'
-import { computeFee, rewardShare } from '../utils/fees'
+import { computeFee, electionStakes, rewardShare } from '../utils/fees'
 
 const H = 3_600_000
 const NIM = 100_000
@@ -16,6 +16,34 @@ const rewards: RewardPoint[] = Array.from({ length: 100 }, (_, i) => ({
   stakes,
 }))
 const payout = (hour: number, amount: number, kind = 'direct'): PayoutPoint => ({ ts: hour * H, amount, kind })
+
+describe('electionStakes', () => {
+  const ours = 'NQ00 OURS'
+  const read = { electionHeight: 1000, snapshotHeight: 1005, stakerBalance: 150, validatorStake: 10_300 }
+
+  it('subtracts the pool restakes between the election and the read', () => {
+    const additions = [
+      { staker: ours, blockHeight: 1001, amount: 50 },
+      { staker: 'NQ00 OTHER', blockHeight: 1005, amount: 250 },
+    ]
+    expect(electionStakes(read, additions, ours)).toEqual({ stakerBalance: 100, validatorStake: 10_000, lagBlocks: 5 })
+  })
+
+  it('keeps restakes up to the election and after the read', () => {
+    const additions = [
+      { staker: ours, blockHeight: 999, amount: 50 },
+      { staker: ours, blockHeight: 1000, amount: 50 },
+      { staker: ours, blockHeight: 1006, amount: 50 },
+    ]
+    expect(electionStakes(read, additions, ours)).toEqual({ stakerBalance: 150, validatorStake: 10_300, lagBlocks: 5 })
+  })
+
+  it('an exact read at the election block is unchanged', () => {
+    const atElection = { ...read, snapshotHeight: 1000 }
+    expect(electionStakes(atElection, [{ staker: ours, blockHeight: 1001, amount: 50 }], ours))
+      .toEqual({ stakerBalance: 150, validatorStake: 10_300, lagBlocks: 0 })
+  })
+})
 
 describe('rewardShare', () => {
   it('nothing before the stake was elected', () => {

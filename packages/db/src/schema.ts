@@ -64,15 +64,32 @@ export const rewardEvents = table('reward_events', {
   rewardedEpoch: integer().notNull(),
 }, t => [index('reward_events_pool_ts').on(t.pool, t.ts)])
 
-/** Stakes fixed at the election block that starts an epoch: the basis for splitting that epoch's rewards. */
+/**
+ * Stakes fixed at the election block that starts an epoch: the basis for splitting that epoch's rewards.
+ * Read at `snapshotHeight` (the client only serves the current state); stake added after the election is in these
+ * raw values and is subtracted when they are used.
+ */
 export const epochStakes = table('epoch_stakes', {
   pool: text().notNull().references(() => pools.address),
   epoch: integer().notNull(),
   electionHeight: integer().notNull(),
+  /** The head height the balances were read at. */
   snapshotHeight: integer().notNull(),
   stakerBalance: integer().notNull(),
   validatorStake: integer().notNull(),
 }, t => [primaryKey({ columns: [t.pool, t.epoch] })])
+
+/**
+ * Add-stake transactions the pool's reward address sent to any staker (restakes of all its stakers, ours included).
+ * Election stakes are read a few blocks after the election, so restakes in between are subtracted again.
+ */
+export const stakeAdditions = table('stake_additions', {
+  txHash: text().primaryKey(),
+  pool: text().notNull().references(() => pools.address),
+  staker: text().notNull(),
+  blockHeight: integer().notNull(),
+  amount: integer().notNull(),
+}, t => [index('stake_additions_pool_height').on(t.pool, t.blockHeight)])
 
 /** What the dedicated wallet really received from the pool. */
 export const payouts = table('payouts', {

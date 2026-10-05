@@ -1,8 +1,8 @@
 import type { Pool } from '@nimiq-pool-monitor/db'
-import type { RewardPoint } from './fees'
-import { and, asc, desc, epochStakes, eq, payouts, pools, rewardEvents, sql } from '@nimiq-pool-monitor/db'
+import type { RewardPoint, StakeAddition } from './fees'
+import { and, asc, desc, epochStakes, eq, payouts, pools, rewardEvents, sql, stakeAdditions } from '@nimiq-pool-monitor/db'
 import { buildEvidenceCsv } from './evidence'
-import { computeFee, rewardShare } from './fees'
+import { computeFee, electionStakes, rewardShare } from './fees'
 
 /** Restake (add-stake) payouts below 100 NIM will be rejected after the next protocol upgrade. */
 const MIN_RESTAKE_LUNA = 100 * 100_000
@@ -46,9 +46,9 @@ function loadRewards(pool: string, limit?: number) {
       reward: rewardEvents.reward,
       epoch: rewardEvents.rewardedEpoch,
       electionHeight: epochStakes.electionHeight,
+      snapshotHeight: epochStakes.snapshotHeight,
       stakerBalance: epochStakes.stakerBalance,
       validatorStake: epochStakes.validatorStake,
-      lagBlocks: sql<number | null>`${epochStakes.snapshotHeight} - ${epochStakes.electionHeight}`,
     })
     .from(rewardEvents)
     .leftJoin(epochStakes, and(eq(epochStakes.pool, rewardEvents.pool), eq(epochStakes.epoch, rewardEvents.rewardedEpoch)))
@@ -57,20 +57,38 @@ function loadRewards(pool: string, limit?: number) {
   return (limit ? query.limit(limit) : query).all()
 }
 
-type RewardRow = ReturnType<typeof loadRewards>[number]
+/** The pool's restakes that landed between an election and the worker's read of its stakes. */
+function loadSnapshotAdditions(pool: string): StakeAddition[] {
+  return useDb()
+    .select({ staker: stakeAdditions.staker, blockHeight: stakeAdditions.blockHeight, amount: stakeAdditions.amount })
+    .from(stakeAdditions)
+    .innerJoin(epochStakes, and(
+      eq(epochStakes.pool, stakeAdditions.pool),
+      sql`${stakeAdditions.blockHeight} > ${epochStakes.electionHeight}`,
+      sql`${stakeAdditions.blockHeight} <= ${epochStakes.snapshotHeight}`,
+    ))
+    .where(eq(stakeAdditions.pool, pool))
+    .all()
+}
 
-function toRewardPoint(r: RewardRow): RewardPoint {
-  return {
-    ts: r.ts,
-    reward: r.reward,
-    epoch: r.epoch,
-    stakes: r.stakerBalance == null ? null : { stakerBalance: r.stakerBalance, validatorStake: r.validatorStake!, lagBlocks: r.lagBlocks! },
-  }
+/** Gross rewards with the stakes fixed at the election of the epoch each one pays for (null = not captured). */
+function loadRewardsWithStakes(p: Pool, limit?: number) {
+  const additions = loadSnapshotAdditions(p.address)
+  return loadRewards(p.address, limit).map(({ snapshotHeight, stakerBalance, validatorStake, ...r }) => ({
+    ...r,
+    stakes: stakerBalance == null
+      ? null
+      : electionStakes({ electionHeight: r.electionHeight!, snapshotHeight: snapshotHeight!, stakerBalance, validatorStake: validatorStake! }, additions, p.walletAddress),
+  }))
+}
+
+function toRewardPoint(r: ReturnType<typeof loadRewardsWithStakes>[number]): RewardPoint {
+  return { ts: r.ts, reward: r.reward, epoch: r.epoch, stakes: r.stakes }
 }
 
 /** The latest rewards with our entitled share of each (0 = not elected yet, null = election stakes unknown). */
 export function rewardHistory(p: Pool, limit: number) {
-  return loadRewards(p.address, limit).map(r => ({
+  return loadRewardsWithStakes(p, limit).map(r => ({
     hash: r.hash,
     blockHeight: r.blockHeight,
     ts: r.ts,
@@ -82,7 +100,7 @@ export function rewardHistory(p: Pool, limit: number) {
 
 export function poolSummary(p: Pool) {
   const received = loadPayouts(p.address)
-  const fee = computeFee(received, loadRewards(p.address).map(toRewardPoint), feeOptions(p))
+  const fee = computeFee(received, loadRewardsWithStakes(p).map(toRewardPoint), feeOptions(p))
   return {
     address: p.address,
     name: p.name,
@@ -109,7 +127,7 @@ export function poolSummary(p: Pool) {
 
 /** All payouts and gross rewards of the pool as a CSV the pool operator can verify. */
 export function poolEvidenceCsv(p: Pool, network: string | null) {
-  const rewards = loadRewards(p.address).reverse()
+  const rewards = loadRewardsWithStakes(p).reverse()
   const received = loadPayouts(p.address)
   return buildEvidenceCsv({
     generatedAt: Date.now(),
@@ -129,6 +147,11 @@ export function poolEvidenceCsv(p: Pool, network: string | null) {
     fee: computeFee(received, rewards.map(toRewardPoint), feeOptions(p)),
     minRestakeLuna: MIN_RESTAKE_LUNA,
     payouts: received,
-    rewards: rewards.map(r => ({ ...r, share: rewardShare(toRewardPoint(r), p.eligibleEpoch) })),
+    rewards: rewards.map(r => ({
+      ...r,
+      stakerBalance: r.stakes?.stakerBalance ?? null,
+      validatorStake: r.stakes?.validatorStake ?? null,
+      share: rewardShare(toRewardPoint(r), p.eligibleEpoch),
+    })),
   })
 }
