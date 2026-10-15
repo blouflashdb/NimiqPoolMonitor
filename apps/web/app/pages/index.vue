@@ -25,27 +25,31 @@ async function copy(text: string) {
 }
 
 // Pools keep their measured fees while and after they are unstaked.
-const monitored = computed(() => (data.value?.pools ?? []).filter(p => p.stakingSince != null))
+const MONITORED = new Set(['staking', 'unstaking', 'unstaked'])
+const monitored = computed(() => (data.value?.pools ?? []).filter(p => p.stakingSince != null && MONITORED.has(p.status)))
 const staking = computed(() => monitored.value.filter(p => p.status === 'staking'))
 const flagged = computed(() => monitored.value.filter(p => p.fee.verdict === 'suspicious'))
 const measured = computed(() => monitored.value.filter(p => p.fee.verdict !== 'insufficient'))
 const warned = computed(() => monitored.value.filter(p => p.fee.flags.length))
 const nodeStale = computed(() => !data.value?.node || Date.now() - data.value.node.ts > 10 * 60_000)
 const unstaking = computed(() => !!data.value && (data.value.unstake.since != null || data.value.unstake.requested))
-const needsFunding = computed(() => !unstaking.value && !!data.value?.funding.address && data.value.funding.stillNeededLuna > data.value.funding.balanceLuna)
+const needsFunding = computed(() => !!data.value?.funding.address && data.value.funding.stillNeededLuna > data.value.funding.balanceLuna)
 
 const confirmUnstake = ref(false)
 const unstakeBusy = ref(false)
+const adminToken = ref('')
 async function unstakeAll() {
   unstakeBusy.value = true
   try {
-    await $fetch('/api/unstake-all', { method: 'POST', body: { confirm: 'unstake-all' } })
+    await $fetch('/api/unstake-all', { method: 'POST', body: { token: adminToken.value } })
     confirmUnstake.value = false
+    adminToken.value = ''
     toast.add({ title: 'Unstaking requested', description: 'The worker starts on its next cycle.' })
     await refresh()
   }
   catch (e) {
-    toast.add({ title: 'Unstaking failed', description: (e as Error).message, color: 'error' })
+    const wrongToken = (e as { statusCode?: number }).statusCode === 403
+    toast.add({ title: wrongToken ? 'Wrong admin token' : 'Unstaking failed', description: wrongToken ? undefined : (e as Error).message, color: 'error' })
   }
   finally {
     unstakeBusy.value = false
@@ -247,12 +251,17 @@ const open = (_e: Event, row: { original: Pool }) => navigateTo(`/pools/${encode
           <UButton color="error" variant="soft" icon="i-lucide-undo-2">
             Unstake all
           </UButton>
+          <template #body>
+            <UFormField label="Admin token" help="Printed in the worker log at startup: docker compose logs worker | grep token">
+              <UInput v-model="adminToken" type="password" autocomplete="off" class="w-full" @keydown.enter="adminToken && unstakeAll()" />
+            </UFormField>
+          </template>
           <template #footer="{ close }">
             <div class="flex justify-end gap-2 w-full">
               <UButton color="neutral" variant="ghost" @click="close">
                 Cancel
               </UButton>
-              <UButton color="error" icon="i-lucide-undo-2" :loading="unstakeBusy" @click="unstakeAll">
+              <UButton color="error" icon="i-lucide-undo-2" :loading="unstakeBusy" :disabled="!adminToken" @click="unstakeAll">
                 Unstake all
               </UButton>
             </div>

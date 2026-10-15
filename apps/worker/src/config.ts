@@ -34,3 +34,5 @@ export const config = {
   poolExclude: env.POOL_EXCLUDE === undefined ? DEFAULT_POOL_EXCLUDE : list(env.POOL_EXCLUDE),
 }
 export const stakeLuna = config.stakeNim * LUNA_PER_NIM
+/** Protocol minimum stake: a staker's active + non-retired inactive balance must be 0 or at least this much. */
+export const minStakeLuna = 100 * LUNA_PER_NIM

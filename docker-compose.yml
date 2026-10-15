@@ -13,6 +13,7 @@ services:
       POOL_EXCLUDE:
       VALIDATORS_API_URL: ${VALIDATORS_API_URL:-}
       WALLET_MNEMONIC: ${WALLET_MNEMONIC:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     volumes:
       - data:/data
 

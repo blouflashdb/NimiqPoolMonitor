@@ -13,7 +13,7 @@ Then open the dashboard, copy the **funding wallet** address and send NIM to it.
 | Service | Role |
 |---|---|
 | `worker` | Runs a Nimiq node via `@nimiq/core` (the web-client, pico sync, no full node needed). Syncs the pool list from the validators-api every 15 min, derives one wallet per pool, funds and stakes, records payouts and gross rewards in SQLite. |
-| `web` | Nuxt 4 + Nuxt UI dashboard. Read-only access to the same SQLite file (shared volume). |
+| `web` | Nuxt 4 + Nuxt UI dashboard. Read-only access to the same SQLite file (shared volume); the only thing it writes is the unstake request (see *Unstake all*). |
 
 **Pools** = validators with `payoutType` `restake` or `direct` and a listed fee, minus `POOL_EXCLUDE`. By default that excludes Nova Pool and Techbits Validator, which are still listed but haven't been operational for a long time. Excluded pools are never funded or monitored. NIM already staked with them stays staked: unstake it in the Nimiq Wallet using the seed.
 
@@ -58,16 +58,16 @@ Pools pay in lumps, so the window starts at the first payout after our first ent
 - *Pays unelected stake*: the pool paid us before our stake was part of an election. That money comes out of other stakers' share, which suggests the pool splits rewards by current rather than election stakes.
 - *Restakes < 100 NIM*: restake payouts below 100 NIM will be rejected after the next protocol upgrade, so small stakers of that pool would stop receiving rewards. The flag fires per add-stake transaction (or per unmatched balance growth) below 100 NIM.
 
-**Unstake all**: the dashboard's *Stop monitoring* card has an *Unstake all* button. Since the web app only reads the database, it drops an `unstake-all.request` file into the data directory, and the worker picks it up on its next tick. From then on, nothing is funded or staked again, and every pool wallet (including excluded pools') moves its NIM back to the funding wallet, one transaction per tick:
-1. *Deactivate* the active stake (`set-active-stake 0`). It is released after the next election plus the lock-up period.
-2. Wait until the staker's `inactiveRelease` block, then *retire* the inactive stake and *withdraw* it (`remove-stake`) straight to the funding wallet. Restakes that arrived in the meantime are deactivated only after that, so they don't restart the lock of the stake already waiting.
-3. When the staker is gone, *sweep* the wallet's liquid NIM (e.g. direct payouts) to the funding wallet.
+**Unstake all**: the dashboard's *Stop monitoring* card has an *Unstake all* button. This can't be undone, so it asks for the admin token the worker prints on startup (`docker compose logs worker | grep token`, or set your own with `ADMIN_TOKEN`). The web app only reads the database, so it drops an `unstake-all.request` file into the data directory, and the worker picks it up on its next tick. From then on, nothing is funded or staked again, and no wallets are assigned to new pools. Every pool wallet, including excluded pools' wallets, moves its NIM back to the funding wallet, one transaction per tick:
+1. *Deactivate* the active stake (`set-active-stake 0`). It is released after the next election plus the lock-up period (and after the validator's jail period, if it is jailed).
+2. At the release, *retire* the inactive stake and *withdraw* it (`remove-stake`) straight to the funding wallet. Restake pools may still add stake after the deactivation. That stake is deactivated only once the inactive stake is retired, so it doesn't restart the lock of the stake already waiting. A retire must leave active + inactive stake at 0 or at least 100 NIM, so if less than 100 NIM is active, the difference stays inactive until the active stake is deactivated too.
+3. When the staker is gone, *sweep* the wallet's liquid NIM (e.g. direct payouts) to the funding wallet. With `TX_FEE_LUNA` > 0, the funding wallet sends the fees that deactivating and retiring need.
 
-Payouts are still recorded while stake remains. This is one-way: the request is stored in the `meta` table (`unstake_all`), and the worker keeps unstaking after restarts.
+Payouts are still recorded, also after the stake is withdrawn, and late payouts are swept again. The request is stored in the `meta` table (`unstake_all`), so the worker keeps unstaking after restarts.
 
 ## Configuration
 
-See [.env.example](.env.example): `NIMIQ_NETWORK` (`TestAlbatross` works too), `STAKE_NIM`, `FEE_TOLERANCE`, `POOL_ALLOWLIST` (cheap trial with a few pools), `POOL_EXCLUDE` (unset = the defaults above, empty = exclude nothing), `WEB_PORT`.
+See [.env.example](.env.example): `NIMIQ_NETWORK` (`TestAlbatross` works too), `STAKE_NIM`, `FEE_TOLERANCE`, `POOL_ALLOWLIST` (cheap trial with a few pools), `POOL_EXCLUDE` (unset = the defaults above, empty = exclude nothing), `WEB_PORT`, `ADMIN_TOKEN` (for *Unstake all*; generated if unset).
 
 ## Development
 

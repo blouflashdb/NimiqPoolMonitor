@@ -9,8 +9,7 @@ const IndexPage = defineComponent({ render: () => h(UApp, () => h(Index)) })
 registerEndpoint('/api/overview', () => ({
   network: 'MainAlbatross',
   node: { head: 1, consensus: true, ts: Date.now() },
-  // Funding would otherwise be asked for: unstaked pools need stake again
-  funding: { address: 'NQ00 FUND', balanceLuna: 0, stakePerPoolLuna: 10_000_000, stillNeededLuna: 20_000_000 },
+  funding: { address: 'NQ00 FUND', balanceLuna: 0, stakePerPoolLuna: 10_000_000, stillNeededLuna: 0 },
   unstake: { since: Date.now(), requested: false, wallets: 2, done: 1 },
   pools: [],
   excluded: [],

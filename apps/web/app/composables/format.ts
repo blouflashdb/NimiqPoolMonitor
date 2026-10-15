@@ -61,9 +61,12 @@ export const statusLabel: Record<string, string> = {
   error: 'Error',
 }
 
-export function statusColor(status: string) {
-  return status === 'staking' ? 'success' : status === 'error' ? 'error' : status === 'unstaking' ? 'warning' : 'neutral'
+const statusColors: Record<string, 'success' | 'warning' | 'error'> = {
+  staking: 'success',
+  unstaking: 'warning',
+  error: 'error',
 }
+export const statusColor = (status: string) => statusColors[status] ?? 'neutral'
 
 export function verdictBadge(f: Fee) {
   const prelim = f.confidence === 'low'

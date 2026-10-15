@@ -15,7 +15,7 @@ const MAX_ATTEMPTS = 3
 /**
  * Reads the stakes of all pools in one batch per kind, so they reflect a single head. The client only serves the
  * current state; when the head moved during the read the height is ambiguous, so the read is repeated. After the last
- * attempt the later head is reported with `exact: false`. Pools whose staker or validator is unknown are left out.
+ * attempt the later head is reported with `exact: false`. Pools whose validator is unknown are left out.
  */
 export async function readStakes(client: SnapshotClient, list: SnapshotPool[]) {
   for (let attempt = 1; ; attempt++) {
@@ -31,8 +31,9 @@ export async function readStakes(client: SnapshotClient, list: SnapshotPool[]) {
     list.forEach((p, i) => {
       const staker = stakers[i]
       const validator = validators[i]
-      if (staker && validator)
-        stakes.push({ pool: p.address, stakerBalance: staker.balance, validatorStake: validator.totalStake })
+      // Only pools that have staked are read, so a missing staker was withdrawn and has no stake.
+      if (validator)
+        stakes.push({ pool: p.address, stakerBalance: staker?.balance ?? 0, validatorStake: validator.totalStake })
     })
     return { height: after, exact: before === after, stakes }
   }

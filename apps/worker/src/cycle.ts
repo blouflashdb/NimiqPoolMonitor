@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { and, asc, count, epochStakes, eq, gt, isNotNull, lt, max, notExists, payouts, pendingTxs, pools, rewardEvents, sql, stakeAdditions, UNSTAKE_REQUEST_FILE } from '@nimiq-pool-monitor/db'
 import * as Nimiq from '@nimiq/core'
 
-import { config, LUNA_PER_NIM, stakeLuna } from './config.ts'
+import { config, LUNA_PER_NIM, minStakeLuna, stakeLuna } from './config.ts'
 import { getMeta, logEvent, setMeta } from './db.ts'
 import { electionBlockFor, eligibleEpoch, rewardedEpoch, stakesEpochAt } from './epochs.ts'
 import { historySince } from './history.ts'
@@ -111,6 +111,8 @@ export class Monitor {
   }
 
   async tick() {
+    // First, so that failing network calls below cannot delay it.
+    this.acceptUnstakeRequest()
     const head = await this.client.getHeadHeight()
     const consensus = await this.client.isConsensusEstablished()
     this.publishNode(head, consensus)
@@ -120,7 +122,6 @@ export class Monitor {
 
     if (Date.now() - this.lastPoolSync > config.poolSyncMinutes * 60_000)
       await this.syncPools()
-    this.acceptUnstakeRequest()
 
     const fundingBalance = (await this.client.getAccount(addr(this.funding))).balance
     setMeta(this.db, 'funding_balance', String(fundingBalance))
@@ -180,7 +181,8 @@ export class Monitor {
         listed: true,
       }
       this.db.insert(pools).values({ address: v.address, ...listing }).onConflictDoUpdate({ target: pools.address, set: listing }).run()
-      if (config.poolExclude.includes(v.address))
+      // No new wallets once everything is being unstaked: they would never be funded.
+      if (config.poolExclude.includes(v.address) || this.unstakingSince)
         continue
       const row = this.db.select({ walletIndex: pools.walletIndex }).from(pools).where(eq(pools.address, v.address)).get()
       if (row?.walletIndex == null) {
@@ -240,12 +242,16 @@ export class Monitor {
     const pending = this.hasPending(pool.address)
 
     if (this.unstakingSince) {
-      if (!pending)
-        await this.unstake(pool, kp, staker, liquid, head)
-      // Keep recording payouts for the epochs our stake was still elected in.
-      if (staker && pool.stakingSince && !pool.excluded)
-        await this.monitorPayouts(pool, wallet, staker.balance, head)
-      return available
+      // Keep recording payouts for the epochs our stake was still elected in, also after it is withdrawn.
+      if (pool.stakingSince && !pool.excluded) {
+        try {
+          await this.monitorPayouts(pool, wallet, staker?.balance ?? 0, head)
+        }
+        catch (e) {
+          logEvent(this.db, 'error', `payout monitoring failed: ${(e as Error).message}`, pool.address)
+        }
+      }
+      return pending ? available : this.unstake(pool, kp, staker, liquid, head, available)
     }
 
     if (!staker) {
@@ -311,9 +317,15 @@ export class Monitor {
     this.recordUnmatchedGrowth(pool, stakerBalance, head)
   }
 
-  /** Sends the next transaction that moves this pool wallet's stake and liquid NIM back to the funding wallet. */
-  private async unstake(pool: Pool, kp: Nimiq.KeyPair, staker: Nimiq.PlainStaker | undefined, liquid: number, head: number) {
-    const step = nextUnstakeStep(staker, liquid, head, config.feeLuna)
+  /**
+   * Sends the next transaction that moves this pool wallet's stake and liquid NIM back to the funding wallet.
+   * Returns the funding balance still available.
+   */
+  private async unstake(pool: Pool, kp: Nimiq.KeyPair, staker: Nimiq.PlainStaker | undefined, liquid: number, head: number, available: number): Promise<number> {
+    const jailRelease = staker?.delegation && staker.inactiveBalance > 0
+      ? (await this.client.getValidator(staker.delegation))?.jailedRelease
+      : undefined
+    const step = nextUnstakeStep({ staker, jailRelease, liquid, head, fee: config.feeLuna, minStake: minStakeLuna })
     const wallet = kp.toAddress()
     const funding = this.funding.toAddress()
     const fee = BigInt(config.feeLuna)
@@ -337,21 +349,37 @@ export class Monitor {
         tx = Nimiq.TransactionBuilder.newBasic(wallet, funding, BigInt(step.value), fee, head, this.networkId)
         action = `sending ${nim(step.value)} to the funding wallet`
         break
-      case 'wait':
-        this.setStatus(pool.address, 'unstaking', step.release != null && step.release > head
-          ? `stake locked until block ${step.release} (~${Math.ceil((step.release - head) / 60)} min)`
-          : step.reason)
-        return
-      case 'done':
-        if (pool.status !== 'unstaked') {
-          this.setStatus(pool.address, 'unstaked', 'everything sent back to the funding wallet')
-          logEvent(this.db, 'info', 'unstaked: everything sent back to the funding wallet', pool.address)
+      case 'topup': {
+        if (available < step.value + config.feeLuna) {
+          this.setStatus(pool.address, 'unstaking', `needs ${step.value} luna from the funding wallet for the transaction fee`)
+          return available
         }
-        return
+        tx = Nimiq.TransactionBuilder.newBasic(funding, wallet, BigInt(step.value), fee, head, this.networkId)
+        const hash = await this.send(tx, this.funding, pool.address, 'fee')
+        this.setStatus(pool.address, 'unstaking', `sending the transaction fee from the funding wallet (${hash})`)
+        return available - step.value - config.feeLuna
+      }
+      case 'wait':
+        this.setStatus(pool.address, 'unstaking', `stake locked until block ${step.release} (~${Math.ceil((step.release - head) / 60)} min)`)
+        return available
+      case 'done': {
+        if (pool.status === 'unstaked')
+          return available
+        // Wallets that were never funded or staked have nothing to return.
+        const returned = pool.status === 'unstaking'
+        const detail = step.leftover
+          ? `${nim(step.leftover)} retired stake left, not more than the transaction fee`
+          : returned ? 'everything sent back to the funding wallet' : 'nothing to return'
+        this.setStatus(pool.address, 'unstaked', detail)
+        if (returned)
+          logEvent(this.db, step.leftover ? 'warn' : 'info', `unstaked: ${detail}`, pool.address)
+        return available
+      }
     }
     const hash = await this.send(tx, kp, pool.address, step.kind)
     this.setStatus(pool.address, 'unstaking', `${action} (${hash})`)
     logEvent(this.db, 'info', `${action} (${hash})`, pool.address)
+    return available
   }
 
   /**

@@ -49,8 +49,18 @@ describe('readStakes', () => {
     expect(client.getStakers).toHaveBeenCalledTimes(3)
   })
 
-  it('leaves out pools whose staker is unknown', async () => {
+  it('counts a withdrawn staker as no stake', async () => {
     const client = fakeClient([1000, 1000], [undefined, { balance: 200 }])
+    const res = await readStakes(client as never, list)
+    expect(res.stakes).toEqual([
+      { pool: 'NQ00 VAL1', stakerBalance: 0, validatorStake: 10_000 },
+      { pool: 'NQ00 VAL2', stakerBalance: 200, validatorStake: 20_000 },
+    ])
+  })
+
+  it('leaves out pools whose validator is unknown', async () => {
+    const client = fakeClient([1000, 1000])
+    client.getValidators.mockResolvedValue([undefined, { totalStake: 20_000 }] as never)
     const res = await readStakes(client as never, list)
     expect(res.stakes.map(s => s.pool)).toEqual(['NQ00 VAL2'])
   })

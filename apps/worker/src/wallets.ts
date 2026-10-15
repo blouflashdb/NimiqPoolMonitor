@@ -1,4 +1,5 @@
 import type { DB } from './db.ts'
+import { randomBytes } from 'node:crypto'
 import process from 'node:process'
 import * as Nimiq from '@nimiq/core'
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39'
@@ -26,6 +27,16 @@ export function loadMnemonic(db: DB): string {
   if (fromEnv && !getMeta(db, 'mnemonic'))
     setMeta(db, 'mnemonic', m)
   return m
+}
+
+/**
+ * Dashboard actions that change something (unstaking everything) require this token. ADMIN_TOKEN overrides it;
+ * otherwise one is generated on first start. The web app reads it from the database.
+ */
+export function loadAdminToken(db: DB): string {
+  const token = process.env.ADMIN_TOKEN?.trim() || getMeta(db, 'admin_token') || randomBytes(16).toString('base64url')
+  setMeta(db, 'admin_token', token)
+  return token
 }
 
 export const addr = (kp: Nimiq.KeyPair) => kp.toAddress().toUserFriendlyAddress()
